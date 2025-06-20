@@ -1,0 +1,208 @@
+function walk_TPC()
+rad2deg=180/pi;
+
+robot=black_robot;
+robot=fkinematic(robot,1);
+%%
+% walk_para 定义了步态的参数，例如步幅、步数、步态周期、双支撑时间、采样时间、滤波系数、重力加速度等。
+walk_para.L_step=0.25;
+walk_para.N_step=18;
+walk_para.T_step=0.3;
+walk_para.P_double=0.2; %%双支撑
+walk_para.T_ready=1.5;
+walk_para.Ts=0.005;
+walk_para.filter_coef=0.8;  %%滤波系数
+
+walk_para.Tr=walk_para.Ts/walk_para.filter_coef;
+walk_para.H_step=0.06;
+walk_para.g=9.8;
+walk_para.zc=0.62;
+%%
+% robot 初始化了机器人模型，并设置关节初始角度。
+robot(3).q=10/180*pi;
+robot(5).q=-20.95048383/180*pi;
+robot(6).q=10.95048383/180*pi;
+
+robot(10).q=10/180*pi;
+robot(12).q=-20.95048383/180*pi;
+robot(13).q=10.95048383/180*pi;
+robot=fkinematic(robot,1);
+walk_para.H_reset=-robot(8).p(3);
+
+push_Time=[5,5.2];
+Nk_push=push_Time/walk_para.Ts;%%步数
+
+%%
+%调用了轨迹生成函数：
+Tra_ankle=Tra_ankle_gen_walk(robot,walk_para);
+Tra_ZMP=Tra_ZMP_gen_walk(robot,walk_para);
+Tra_CoM=Tra_CoM_gen_walk(Tra_ZMP,robot,walk_para);
+
+TPC_coef=get_TPC_coef(walk_para);
+
+
+%% 仿真设置
+Control_T = 5;%4
+vrobot = MatlabVrep(Control_T);
+vrobot = vrobot.init();
+eulerAngles=[0;90;-180]/rad2deg;
+vrobot.set_body_o(eulerAngles);
+R0_robot = eul2rotm(eulerAngles','xyz');
+
+Data_Num = length(Tra_CoM.x);
+vrobot.go();
+FR=[0 0 0];
+FL=[0 0 0];
+taoR=[0 0 0];
+taoL=[0 0 0];
+ZMP_B=[0 0];
+
+FR_last=[0 0 0];
+FL_last=[0 0 0];
+taoR_last=[0 0 0];
+taoL_last=[0 0 0];
+filter_coef=walk_para.filter_coef;
+
+CoM_TPC=[0 0];
+dCoM_TPC=[0 0];
+CoM_TPC1= zeros(2,1681);
+jointl= zeros(1681,12);
+
+for ii=1:1:Data_Num
+    %% 规划轨迹
+    if ii<=50
+        TargetR.p=[Tra_ankle.xR(ii);Tra_ankle.yR(ii);Tra_ankle.zR(ii)]-[Tra_CoM.x(ii);Tra_CoM.y(ii);Tra_CoM.z(ii)];
+        TargetL.p=[Tra_ankle.xL(ii);Tra_ankle.yL(ii);Tra_ankle.zL(ii)]-[Tra_CoM.x(ii);Tra_CoM.y(ii);Tra_CoM.z(ii)];
+        TargetR.R=eye(3);
+        TargetL.R=eye(3);
+    else
+        err_ZMP=ZMP_B(ii-1,:)-[Tra_ZMP.x(ii) Tra_ZMP.y(ii)]+[Tra_CoM.x(ii) Tra_CoM.y(ii)];
+        ddCoM_TPC=TPC_coef*[err_ZMP;CoM_TPC;dCoM_TPC];
+        dCoM_TPC=dCoM_TPC+walk_para.Ts*ddCoM_TPC;
+        CoM _TPC=CoM_TPC+walk_para.Ts*dCoM_TPC;
+        CoM_TPC1(:,ii) = CoM_TPC;
+        
+        TargetR.p=[Tra_ankle.xR(ii);Tra_ankle.yR(ii);Tra_ankle.zR(ii)]-[Tra_CoM.x(ii);Tra_CoM.y(ii);Tra_CoM.z(ii)]-[CoM_TPC 0]';
+        TargetL.p=[Tra_ankle.xL(ii);Tra_ankle.yL(ii);Tra_ankle.zL(ii)]-[Tra_CoM.x(ii);Tra_CoM.y(ii);Tra_CoM.z(ii)]-[CoM_TPC 0]';
+        TargetR.R=eye(3);
+        TargetL.R=eye(3);
+    end
+    
+    robot=ikinematic(robot,7,TargetR);%通过逆运动学将轨迹误差转化为关节空间的角度误差
+    robot=ikinematic(robot,14,TargetL);
+    %% 下发角度
+    Joint(1)=robot(2).q;
+    Joint(2)=robot(4).q;
+    Joint(3)=robot(3).q;
+    Joint(4)=robot(5).q;
+    Joint(5)=robot(6).q;
+    Joint(6)=robot(7).q;
+    Joint(7)=robot(9).q;
+    Joint(8)=robot(11).q;
+    Joint(9)=robot(10).q;
+    Joint(10)=robot(12).q;
+    Joint(11)=robot(13).q;
+    Joint(12)=robot(14).q;
+    
+    jointl(ii, :) = [robot(2).q, robot(4).q, robot(3).q, robot(5).q, robot(6).q, ...
+                robot(7).q, robot(9).q, robot(11).q, robot(10).q, robot(12).q, ...
+                robot(13).q, robot(14).q];
+
+%     Joint(16)=robot(6).q-45/180*pi;
+%     Joint(18)=50/180*pi;
+%     Joint(19)=robot(13).q-45/180*pi;
+%     Joint(21)=50/180*pi;
+    
+    
+    %% 下发
+    vrobot.Joint = [Joint,zeros(1,11)];
+    vrobot.set_joint();
+    vrobot.trigger();
+    %% 施加推力
+    if ii>Nk_push(1)&&ii<=Nk_push(2)
+        vrobot.Push(0,-200,0);
+    else
+        if ii>Nk_push(2)
+            vrobot.Stop_Push;
+        end
+    end
+    %% 传感数据
+    q_rel = vrobot.get_Joint_position;
+    [F,tao]=vrobot.get_force_sensor;
+    body_eul=vrobot.get_body_eul;
+    body_p(:,ii)=vrobot.get_body_p;%%%%%%%%%%get body.p
+    Rt_robot=eul2rotm(body_eul,'xyz');
+    err_R=Rt_robot'*R0_robot;
+    err_w=Rt_robot*rot2omega(err_R);
+    
+    isfall=0;
+    if ii>1 && norm(err_w)>10/180*pi %%通过检测机器人姿态角速度 err_w 的幅值，判断机器人是否即将跌倒。
+                                        % 如果超过设定阈值（10 度/秒），停止推力施加并退出循环。
+        vrobot.Stop_Push;
+        isfall=1;
+        break
+    end
+    
+    %%
+    %控制体现在ZMP_B(ii,:)调整COM
+    if ii>1
+        robot(2).q=q_rel(1);
+        robot(4).q=q_rel(2);
+        robot(3).q=q_rel(3);
+        robot(5).q=q_rel(4);
+        robot(6).q=q_rel(5);
+        robot(7).q=q_rel(6);
+        robot(9).q=q_rel(7);
+        robot(11).q=q_rel(8);
+        robot(10).q=q_rel(9);
+        robot(12).q=q_rel(10);
+        robot(13).q=q_rel(11);
+        robot(14).q=q_rel(12);
+        robot=fkinematic(robot,1);
+        
+        FR(ii,:)=F(1,:)*filter_coef+FR_last*(1-filter_coef);
+        FL(ii,:)=F(2,:)*filter_coef+FL_last*(1-filter_coef);
+        taoR(ii,:)=tao(1,:)*filter_coef+taoR_last*(1-filter_coef);
+        taoL(ii,:)=tao(2,:)*filter_coef+taoL_last*(1-filter_coef);
+        
+        FR_last=FR(ii,:);
+        FL_last=FL(ii,:);
+        taoR_last=taoR(ii,:);
+        taoL_last=taoL(ii,:);
+        
+        ZMP_B(ii,:)=cal_ZMP_B(robot(7).p,robot(14).p,robot(7).R,robot(14).R,FR(ii,:),FL(ii,:),taoR(ii,:),taoL(ii,:));
+        
+    end
+
+end
+
+
+%%%若机器人检测到跌倒，可调用预定义的 spline_start2end 或 rise_up_black 函数，使机器人重新站立。
+if 0
+    q_mark=[q_rel;
+        [0 0 0 -130 60 0 0 0 0 -130 60 0 0 -10 0 -70 0 130 -70 0 130]/180*pi;];
+    Joint_fall=spline_start2end(q_mark(1,:),q_mark(2,:),1,walk_para.Ts,0.5)*180/pi;
+    Joint_fall=[Joint_fall;kron(Joint_fall(end,:),ones(400,1))];
+    [Data_Num,~]=size(Joint_fall);
+    for nnn=1:Data_Num
+        vrobot.Joint = Joint_fall(nnn,:);
+        vrobot.set_joint();
+        vrobot.trigger();
+    end
+    
+    Joint_stand=rise_up_black(1,2,walk_para.Ts);
+    [Data_Num,~]=size(Joint_stand);
+    for nnn=1:Data_Num
+        vrobot.Joint = Joint_stand(nnn,:);
+        vrobot.set_joint();
+        vrobot.trigger();
+    end
+    
+end
+
+% disp(CoM_TPC1(:,:));
+save('myData.mat', 'CoM_TPC1');
+save('JointData.mat', 'jointl');
+vrobot.pause();
+vrobot.stop();
+end
